@@ -87,7 +87,9 @@ func (s *Source) Run(ctx context.Context, domain string, session *subscraping.Se
 			}
 			if response.Code == 429 {
 				gologger.Debug().Msgf("Hunter API  speed limit")
-				return
+				currentPage -= 1
+				time.Sleep(time.Second * 5)
+				continue
 			}
 			if response.Data.Total > 0 {
 				for _, hunterInfo := range response.Data.InfoArr {
