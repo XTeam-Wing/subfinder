@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"github.com/projectdiscovery/gologger"
 	"strings"
 	"time"
 
@@ -53,42 +54,50 @@ func (s *Source) Run(ctx context.Context, domain string, session *subscraping.Se
 		}
 
 		// fofa api doc https://fofa.info/static_pages/api_help
-		qbase64 := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("domain=\"%s\"", domain)))
-		resp, err := session.SimpleGet(ctx, fmt.Sprintf("https://fofa.info/api/v1/search/all?full=true&fields=host&page=1&size=10000&email=%s&key=%s&qbase64=%s", randomApiKey.username, randomApiKey.secret, qbase64))
-		if err != nil && resp == nil {
-			results <- subscraping.Result{Source: s.Name(), Type: subscraping.Error, Error: err}
-			s.errors++
-			session.DiscardHTTPResponse(resp)
-			return
-		}
+		var pages = 1
+		var pageSize = 1000
+		for currentPage := 1; currentPage <= pages; currentPage++ {
+			gologger.Debug().Msgf("Querying %s for %s, currentPage:%d allPage:%d", s.Name(), domain, currentPage, pages)
 
-		var response fofaResponse
-		err = jsoniter.NewDecoder(resp.Body).Decode(&response)
-		if err != nil {
-			results <- subscraping.Result{Source: s.Name(), Type: subscraping.Error, Error: err}
-			s.errors++
+			qbase64 := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("domain=\"%s\"", domain)))
+			resp, err := session.SimpleGet(ctx, fmt.Sprintf("https://fofa.info/api/v1/search/all?full=true&fields=host&page=%d&size=%d&email=%s&key=%s&qbase64=%s", currentPage, pageSize, randomApiKey.username, randomApiKey.secret, qbase64))
+			if err != nil && resp == nil {
+				results <- subscraping.Result{Source: s.Name(), Type: subscraping.Error, Error: err}
+				s.errors++
+				session.DiscardHTTPResponse(resp)
+				return
+			}
+
+			var response fofaResponse
+			err = jsoniter.NewDecoder(resp.Body).Decode(&response)
+			if err != nil {
+				results <- subscraping.Result{Source: s.Name(), Type: subscraping.Error, Error: err}
+				s.errors++
+				resp.Body.Close()
+				return
+			}
 			resp.Body.Close()
-			return
-		}
-		resp.Body.Close()
 
-		if response.Error {
-			results <- subscraping.Result{
-				Source: s.Name(), Type: subscraping.Error, Error: fmt.Errorf("%s", response.ErrMsg),
-			}
-			s.errors++
-			return
-		}
-
-		if response.Size > 0 {
-			for _, subdomain := range response.Results {
-				if strings.HasPrefix(strings.ToLower(subdomain), "http://") || strings.HasPrefix(strings.ToLower(subdomain), "https://") {
-					subdomain = subdomain[strings.Index(subdomain, "//")+2:]
+			if response.Error {
+				results <- subscraping.Result{
+					Source: s.Name(), Type: subscraping.Error, Error: fmt.Errorf("%s", response.ErrMsg),
 				}
-				results <- subscraping.Result{Source: s.Name(), Type: subscraping.Subdomain, Value: subdomain}
-				s.results++
+				s.errors++
+				return
+			}
+
+			if response.Size > 0 {
+				for _, subdomain := range response.Results {
+					if strings.HasPrefix(strings.ToLower(subdomain), "http://") || strings.HasPrefix(strings.ToLower(subdomain), "https://") {
+						subdomain = subdomain[strings.Index(subdomain, "//")+2:]
+					}
+					results <- subscraping.Result{Source: s.Name(), Type: subscraping.Subdomain, Value: subdomain}
+					s.results++
+				}
+				pages = int(response.Size/pageSize) + 1
 			}
 		}
+
 	}()
 
 	return results

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/projectdiscovery/gologger"
 	"strings"
 	"time"
 
@@ -58,44 +59,54 @@ func (s *Source) Run(ctx context.Context, domain string, session *subscraping.Se
 		}
 
 		// quake api doc https://quake.360.cn/quake/#/help
-		var requestBody = []byte(fmt.Sprintf(`{"query":"domain: *.%s", "start":0, "size":500}`, domain))
-		resp, err := session.Post(ctx, "https://quake.360.cn/api/v3/search/quake_service", "", map[string]string{
-			"Content-Type": "application/json", "X-QuakeToken": randomApiKey,
-		}, bytes.NewReader(requestBody))
-		if err != nil {
-			results <- subscraping.Result{Source: s.Name(), Type: subscraping.Error, Error: err}
-			s.errors++
-			session.DiscardHTTPResponse(resp)
-			return
-		}
+		var pages = 1
+		var pageSize = 500
+		for currentPage := 1; currentPage <= pages; currentPage++ {
+			gologger.Debug().Msgf("Querying %s for %s, currentPage:%d allPage:%d", s.Name(), domain, currentPage, pages)
+			var requestBody = []byte(fmt.Sprintf(`{"query":"domain: %s", "start":%d, "size":%d,"ignore_cache": false,
+"include": ["service.http.host"]}`,
+				domain, (currentPage-1)*pageSize, pageSize))
+			resp, err := session.Post(ctx, "https://quake.360.net/api/v3/search/quake_service", "", map[string]string{
+				"Content-Type": "application/json", "X-QuakeToken": randomApiKey,
+			}, bytes.NewReader(requestBody))
+			if err != nil {
+				results <- subscraping.Result{Source: s.Name(), Type: subscraping.Error, Error: err}
+				s.errors++
+				session.DiscardHTTPResponse(resp)
+				return
+			}
 
-		var response quakeResults
-		err = jsoniter.NewDecoder(resp.Body).Decode(&response)
-		if err != nil {
-			results <- subscraping.Result{Source: s.Name(), Type: subscraping.Error, Error: err}
-			s.errors++
+			var response quakeResults
+			err = jsoniter.NewDecoder(resp.Body).Decode(&response)
+			if err != nil {
+				results <- subscraping.Result{Source: s.Name(), Type: subscraping.Error, Error: err}
+				s.errors++
+				resp.Body.Close()
+				return
+			}
 			resp.Body.Close()
-			return
-		}
-		resp.Body.Close()
 
-		if response.Code != 0 {
-			results <- subscraping.Result{
-				Source: s.Name(), Type: subscraping.Error, Error: fmt.Errorf("%s", response.Message),
-			}
-			s.errors++
-			return
-		}
-
-		if response.Meta.Pagination.Total > 0 {
-			for _, quakeDomain := range response.Data {
-				subdomain := quakeDomain.Service.HTTP.Host
-				if strings.ContainsAny(subdomain, "暂无权限") {
-					subdomain = ""
+			if response.Code != 0 {
+				results <- subscraping.Result{
+					Source: s.Name(), Type: subscraping.Error, Error: fmt.Errorf("%s", response.Message),
 				}
-				results <- subscraping.Result{Source: s.Name(), Type: subscraping.Subdomain, Value: subdomain}
-				s.results++
+				s.errors++
+				return
 			}
+
+			if response.Meta.Pagination.Total > 0 {
+				for _, quakeDomain := range response.Data {
+					subdomain := quakeDomain.Service.HTTP.Host
+					if strings.ContainsAny(subdomain, "暂无权限") {
+						subdomain = ""
+					}
+					results <- subscraping.Result{Source: s.Name(), Type: subscraping.Subdomain, Value: subdomain}
+					s.results++
+				}
+				pages = int(response.Meta.Pagination.Total/pageSize) + 1
+			}
+			time.Sleep(2 * time.Second)
+
 		}
 	}()
 
